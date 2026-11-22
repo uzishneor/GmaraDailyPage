@@ -5,91 +5,88 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"].strip()
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"].strip()
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
 
+
 def flatten_text(data):
-    """Safely flattens nested lists returned by Sefaria into a single string."""
+    """Flattens nested lists returned by Sefaria into plain text."""
     if isinstance(data, str):
         return data
     if isinstance(data, list):
-        return "\n".join(filter(None, (flatten_text(item) for item in data)))
+        return " ".join(filter(None, (flatten_text(item) for item in data)))
     return ""
 
-def generate_with_fallback(api_key, prompt):
-    """Tries available Gemini models in priority order, skipping any with 0 quota or 404."""
-    resp = requests.get(
-        f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
-        timeout=20
+
+def get_daf_yomi():
+    """Fetches today's Daf Yomi reference, Sefaria URL, and a short excerpt."""
+    cal = requests.get("https://www.sefaria.org/api/calendars", timeout=10).json()
+    daf_item = next(
+        item for item in cal["calendar_items"] if item["title"]["en"] == "Daf Yomi"
     )
-    resp.raise_for_status()
-    available = [
-        m["name"] for m in resp.json().get("models", [])
-        if "generateContent" in m.get("supportedGenerationMethods", [])
-    ]
+    ref = daf_item["ref"]
+    url = f"https://www.sefaria.org/{ref.replace(' ', '_')}"
 
-    # Try stable/standard Flash & Pro models before preview/experimental ones
-    preferred = [
-        "models/gemini-3.8-flash",
-        "models/gemini-3.5-flash",
-        "models/gemini-3.0-flash",
-        "models/gemini-2.5-flash-lite",
-        "models/gemini-2.5-pro",
-    ]
-    candidates = [m for m in preferred if m in available] + [
-        m for m in available if m not in preferred and "omni" not in m and "image" not in m and "tts" not in m
-    ]
+    text_data = requests.get(
+        f"https://www.sefaria.org/api/texts/{ref}?context=0", timeout=10
+    ).json()
+    raw_text = flatten_text(text_data.get("text") or text_data.get("he") or [])
+    excerpt = " ".join(raw_text.split())[:800]
+    return ref, url, excerpt
 
-    errors = []
-    for model_name in candidates:
-        print(f"Trying {model_name}...")
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}",
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=30
-        )
-        if r.ok:
-            print(f"Succeeded with {model_name}")
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        errors.append(f"{model_name} -> {r.status_code}")
 
-    raise RuntimeError(f"All models failed. Tried: {errors}")
+def summarize_with_gemini(ref, excerpt):
+    """Attempts a concise structured summary via Gemini; raises on failure."""
+    prompt = f"""Summarize ONE sugya from {ref} in under 150 words. Avoid underscores and nested asterisks.
 
-# 1. Fetch today's Daf Yomi reference from Sefaria
-cal = requests.get("https://www.sefaria.org/api/calendars", timeout=20).json()
-daf_item = next(item for item in cal["calendar_items"] if item["title"]["en"] == "Daf Yomi")
-ref = daf_item["ref"]
-
-# 2. Fetch the text (Aramaic/Hebrew + English)
-text_data = requests.get(f"https://www.sefaria.org/api/texts/{ref}?context=0", timeout=20).json()
-he_text = flatten_text(text_data.get("he", []))
-en_text = flatten_text(text_data.get("text", []))
-
-# 3. Summarize one sugya via Gemini Free Tier
-prompt = f"""
-You are a Talmudic scholar. Based ONLY on the text below from {ref}, select ONE central, self-contained sugya (issue) and summarize it concisely (under 250 words).
-Do not use Markdown underscores or nested asterisks that break Telegram formatting.
-
-Format strictly as:
 📖 Source: {ref}
-❓ The Issue (השאלה): [1-2 sentences]
-⚖️ The Positions (המחלוקת): [Core arguments]
-✅ The Resolution (המסקנה): [How it is resolved or if Teiku]
-💡 Takeaway: [1 sentence]
+❓ The Issue (השאלה):
+⚖️ The Positions (המחלוקת):
+✅ The Resolution (המסקנה):
+💡 Takeaway:
 
-Hebrew/Aramaic Text:
-{he_text[:12000]}
-
-English Text:
-{en_text[:12000]}
+Excerpt:
+{excerpt}
 """
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+        json={"contents": [{"parts": [{"text": prompt}]}]},
+        timeout=15,
+    )
+    if not r.ok:
+        raise RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
 
-summary = generate_with_fallback(GEMINI_API_KEY, prompt)
+    text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if not text:
+        raise RuntimeError("Empty response from Gemini")
+    return text
 
-# 4. Send to Telegram
-tg_resp = requests.post(
-    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-    json={"chat_id": TELEGRAM_CHAT_ID, "text": summary},
-    timeout=20
-)
-if not tg_resp.ok:
-    raise RuntimeError(f"Telegram API error {tg_resp.status_code}: {tg_resp.text}")
 
-print(f"Successfully sent summary for {ref}")
+def build_direct_fallback(ref, url, excerpt):
+    """Fallback message when Gemini hits quota/rate limits or times out."""
+    return (
+        f"📖 Source: {ref}\n"
+        f"🔗 Sefaria: {url}\n"
+        f"ℹ️ Direct excerpt (Gemini unavailable/quota limit):\n\n"
+        f"{excerpt}..."
+    )
+
+
+def send_telegram(message):
+    tg = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+        timeout=10,
+    )
+    if not tg.ok:
+        raise RuntimeError(f"Telegram {tg.status_code}: {tg.text[:200]}")
+
+
+ref, url, excerpt = get_daf_yomi()
+
+try:
+    message = summarize_with_gemini(ref, excerpt)
+    print(f"Sent Gemini summary for {ref}")
+except Exception as err:
+    print(f"Gemini skipped ({err}); using direct Sefaria fallback.")
+    message = build_direct_fallback(ref, url, excerpt)
+
+send_telegram(message)
+print(f"Delivered message for {ref} to Telegram.")
