@@ -6,15 +6,15 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"].strip()
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"].strip()
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
 
-# Curated Talmudic pages rich in philosophy, social ethics, and interpersonal law (בין אדם לחברו)
+# Philosophical, social, and interpersonal law (בין אדם לחברו) passages
 PHILOSOPHICAL_SOCIAL_LAW_REFS = [
-    "Sanhedrin 37a",     # Creation of a single human being: saving one life = saving a world; human equality
-    "Bava Metzia 62a",   # "חייך קודמים" - social & ethical dilemma of survival and shared responsibility
-    "Bava Metzia 83a",   # Labor law, employer/worker ethics, and moral accountability beyond strict law
-    "Bava Kamma 30a",    # Interpersonal damages, public space ethics, and "לפנים משורת הדין"
-    "Bava Batra 21a",    # Competition, livelihood, community norms, and neighborly/social obligations
-    "Shabbat 31a",       # Hillel's golden rule: "מה דעלך סני לחברך לא תעביד" - core interpersonal ethic
-    "Gittin 59b",        # Peace, social harmony, and interpersonal conduct ("דרכי שלום")
+    "Sanhedrin 37a",     # ערך האדם היחיד, שוויון בני אדם ואחריות לחיי אדם
+    "Bava Metzia 62a",   # דילמה חברתית ומוסרית של הישרדות ואחריות משותפת
+    "Bava Metzia 83a",   # יחסי עבודה, אחריות מעסיק ועובד וחובת מוסר מעבר לחוק היבש
+    "Bava Kamma 30a",    # נזקים במרחב הציבורי, יחסים בין אנשים והתנהגות מעבר לשורת הדין
+    "Bava Batra 21a",    # תחרות כלכלית, פרנסה, אחריות קהילתית וזכויות שכנים
+    "Shabbat 31a",       # הכלל המוסרי שבין אדם לחברו ותמצית היחס לזולת
+    "Gittin 59b",        # שמירה על שלום, הרמוניה חברתית והתנהלות בין אנשים
 ]
 
 
@@ -27,8 +27,8 @@ def flatten_text(data):
     return ""
 
 
-def get_philosophical_social_law_passage():
-    """Fetches a Talmudic page focused on philosophy, society, or interpersonal law from Sefaria."""
+def get_passage_context():
+    """Fetches a passage from Sefaria to give Gemini the underlying idea."""
     ref = random.choice(PHILOSOPHICAL_SOCIAL_LAW_REFS)
     url = f"https://www.sefaria.org/{ref.replace(' ', '_')}"
 
@@ -37,48 +37,89 @@ def get_philosophical_social_law_passage():
     ).json()
     he_raw = flatten_text(text_data.get("he") or [])
     en_raw = flatten_text(text_data.get("text") or [])
-    excerpt = " ".join((he_raw or en_raw).split())[:1000]
+    context_text = " ".join((en_raw or he_raw).split())[:900]
     he_ref = text_data.get("heRef") or ref
-    return ref, he_ref, url, excerpt
+    return ref, he_ref, url, context_text
 
 
-def summarize_in_hebrew(ref, he_ref, excerpt):
-    """Summarizes a philosophical, social, or interpersonal law sugya in structured Hebrew."""
-    prompt = f"""אתה פרשן תלמודי. בהתבסס אך ורק על הקטע המצורף מתוך {ref} ({he_ref}), בחר סוגיה מרכזית אחת העוסקת בפילוסופיה, בחברה או במשפט שבין אדם לחברו, וסכם אותה בעברית ברורה ותמציתית (עד 180 מילים).
-הימנע מקווים תחתונים (_) ומכוכביות כפולות (**).
+def pick_gemini_models(api_key):
+    """Finds available text generation models on the key, skipping preview/media models."""
+    try:
+        resp = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            timeout=10,
+        )
+        if not resp.ok:
+            return ["models/gemini-2.5-flash"]
+        models = resp.json().get("models", [])
+        blocked = ("omni", "image", "tts", "audio", "live", "embedding", "veo", "imagen", "preview", "exp")
+        found = [
+            m["name"]
+            for m in models
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+            and "gemini" in m.get("name", "").lower()
+            and not any(bad in m.get("name", "").lower() for bad in blocked)
+        ]
+        # Prefer standard flash models first
+        found.sort(key=lambda n: (0 if "flash" in n.lower() else 1, n), reverse=True)
+        return found or ["models/gemini-2.5-flash"]
+    except Exception:
+        return ["models/gemini-2.5-flash"]
 
-הצג בדיוק במבנה הבא:
+
+def explain_simply_in_hebrew(ref, he_ref, context_text):
+    """Asks Gemini for a plain-Hebrew explanation: case first, then explained discussion."""
+    prompt = f"""אתה מסביר סוגיות מהתלמוד בשפה יומיומית פשוטה, ברורה וטבעית בעברית (כמו הסבר לחבר).
+הנושא: פילוסופיה, חברה, מוסר או משפט שבין אדם לחברו.
+
+כללים חשובים מאוד:
+1. אל תצטט ואל תשתמש במילות המקור מהגמרא או בארמית — נסח הכל מחדש במילים שלך כהסבר מובן ופשוט.
+2. הימנע מקווים תחתונים (_) ומכוכביות כפולות (**).
+3. פעל בדיוק לפי שני החלקים שלהלן (סה"כ עד 200 מילים):
+
 📖 מקור: {he_ref} ({ref})
-🧠 הסוגיה (פילוסופיה / חברה / בין אדם לחברו): [משפט אחד ברור]
-❓ השאלה המרכזית: [1-2 משפטים]
-⚖️ העמדות והמחלוקת: [עיקרי הדעות והנימוקים]
-✅ המסקנה / ההכרעה: [כיצד הסוגיה מוכרעת או נותרת בתיקו]
-💡 נקודה למחשבה: [משפט אחד]
 
-קטע מתוך הגמרא:
-{excerpt}
+🧩 המקרה בפשטות:
+[תאר ב-2-3 משפטים פשוטים מה הסיטואציה או הדילמה שקורה כאן בחיים]
+
+💡 הסבר הסוגיה והמשמעות:
+[הסבר במילים פשוטות מה הצדדים השונים חושבים, למה יש מתח או ויכוח, ומה הרעיון המרכזי לחיים ולחברה]
+
+רקע לעיון (אל תצטט ממנו מילה במילה):
+{context_text}
 """
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}",
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=15,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
+    last_error = "לא התקבלה תשובה"
+    for model_name in pick_gemini_models(GEMINI_API_KEY):
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_API_KEY}",
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.5, "maxOutputTokens": 650},
+                },
+                timeout=15,
+            )
+            if r.ok:
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if text:
+                    print(f"Generated explanation using {model_name}")
+                    return text
+            last_error = f"{model_name} ({r.status_code}): {r.text[:160]}"
+        except Exception as e:
+            last_error = f"{model_name}: {e}"
 
-    text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    if not text:
-        raise RuntimeError("תגובה ריקה מ-Gemini")
-    return text
+    raise RuntimeError(last_error)
 
 
-def build_hebrew_fallback(ref, he_ref, url, excerpt):
-    """Fallback message in Hebrew when Gemini hits quota/rate limits or times out."""
+def build_hebrew_fallback(ref, he_ref, url, err):
+    """Clean Hebrew fallback if Gemini has no available free quota right now."""
     return (
-        f"📖 מקור: {he_ref} ({ref})\n"
-        f"🔗 קישור לספריא: {url}\n"
-        f"ℹ️ קטע ישיר (ללא עיבוד AI עקב מגבלת מכסה/זמן):\n\n"
-        f"{excerpt}..."
+        f"📖 מקור: {he_ref} ({ref})\n\n"
+        f"🧩 המקרה בפשטות:\n"
+        f"הדף עוסק בסוגיה חברתית, מוסרית או בדינים שבין אדם לחברו.\n\n"
+        f"💡 הסבר הסוגיה והמשמעות:\n"
+        f"כרגע מכסת השימוש החינמית ב-Gemini אינה זמינה ולכן לא הופק עיבוד מלא ({err}).\n"
+        f"קישור לקריאה בספריא: {url}"
     )
 
 
@@ -92,14 +133,13 @@ def send_telegram(message):
         raise RuntimeError(f"Telegram {tg.status_code}: {tg.text[:200]}")
 
 
-ref, he_ref, url, excerpt = get_philosophical_social_law_passage()
+ref, he_ref, url, context_text = get_passage_context()
 
 try:
-    message = summarize_in_hebrew(ref, he_ref, excerpt)
-    print(f"Sent Hebrew summary for {ref}")
+    message = explain_simply_in_hebrew(ref, he_ref, context_text)
 except Exception as err:
-    print(f"Gemini skipped ({err}); using Hebrew direct fallback.")
-    message = build_hebrew_fallback(ref, he_ref, url, excerpt)
+    print(f"Gemini fallback triggered: {err}")
+    message = build_hebrew_fallback(ref, he_ref, url, err)
 
 send_telegram(message)
-print(f"Delivered Hebrew message for {ref} to Telegram.")
+print(f"Delivered message for {ref} to Telegram.")
