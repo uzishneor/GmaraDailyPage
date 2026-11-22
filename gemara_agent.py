@@ -37,7 +37,7 @@ def get_passage_context():
     ).json()
     he_raw = flatten_text(text_data.get("he") or [])
     en_raw = flatten_text(text_data.get("text") or [])
-    context_text = " ".join((en_raw or he_raw).split())[:900]
+    context_text = " ".join((en_raw or he_raw).split())[:1000]
     he_ref = text_data.get("heRef") or ref
     return ref, he_ref, url, context_text
 
@@ -60,7 +60,6 @@ def pick_gemini_models(api_key):
             and "gemini" in m.get("name", "").lower()
             and not any(bad in m.get("name", "").lower() for bad in blocked)
         ]
-        # Prefer standard flash models first
         found.sort(key=lambda n: (0 if "flash" in n.lower() else 1, n), reverse=True)
         return found or ["models/gemini-2.5-flash"]
     except Exception:
@@ -68,22 +67,25 @@ def pick_gemini_models(api_key):
 
 
 def explain_simply_in_hebrew(ref, he_ref, context_text):
-    """Asks Gemini for a plain-Hebrew explanation: case first, then explained discussion."""
-    prompt = f"""אתה מסביר סוגיות מהתלמוד בשפה יומיומית פשוטה, ברורה וטבעית בעברית (כמו הסבר לחבר).
+    """Asks Gemini for a complete plain-Hebrew explanation: case, problem & discussion, and resolution."""
+    prompt = f"""אתה מסביר סוגיות מהתלמוד בעברית פשוטה, טבעית וברורה (כמו הסבר לחבר).
 הנושא: פילוסופיה, חברה, מוסר או משפט שבין אדם לחברו.
 
-כללים חשובים מאוד:
-1. אל תצטט ואל תשתמש במילות המקור מהגמרא או בארמית — נסח הכל מחדש במילים שלך כהסבר מובן ופשוט.
+כללים חשובים:
+1. אל תצטט ואל תשתמש במילות המקור מהגמרא או בארמית — נסח הכל מחדש במילים שלך כהסבר ברור.
 2. הימנע מקווים תחתונים (_) ומכוכביות כפולות (**).
-3. פעל בדיוק לפי שני החלקים שלהלן (סה"כ עד 200 מילים):
+3. השלם תמיד את כל שלושת החלקים עד הסוף במשפטים שלמים ומלאים, בלי להיחתך באמצע:
 
 📖 מקור: {he_ref} ({ref})
 
 🧩 המקרה בפשטות:
-[תאר ב-2-3 משפטים פשוטים מה הסיטואציה או הדילמה שקורה כאן בחיים]
+[תאר ב-2-3 משפטים פשוטים מה הסיטואציה שקורה במציאות]
 
-💡 הסבר הסוגיה והמשמעות:
-[הסבר במילים פשוטות מה הצדדים השונים חושבים, למה יש מתח או ויכוח, ומה הרעיון המרכזי לחיים ולחברה]
+⚖️ הבעיה והדיון:
+[הסבר ב-3-4 משפטים מה הדילמה או ההתנגשות בין הצדדים, ומה הנימוקים המרכזיים שעולים בדיון]
+
+✅ המסקנה וההכרעה:
+[הסבר ב-2-3 משפטים איך הסוגיה מוכרעת או מתיישבת, ומה הרעיון המרכזי לחיים ולחברה]
 
 רקע לעיון (אל תצטט ממנו מילה במילה):
 {context_text}
@@ -95,12 +97,14 @@ def explain_simply_in_hebrew(ref, he_ref, context_text):
                 f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_API_KEY}",
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.5, "maxOutputTokens": 650},
+                    "generationConfig": {"temperature": 0.45, "maxOutputTokens": 1400},
                 },
-                timeout=15,
+                timeout=20,
             )
             if r.ok:
-                text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                data = r.json()
+                parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                text = "\n".join(p.get("text", "") for p in parts if "text" in p).strip()
                 if text:
                     print(f"Generated explanation using {model_name}")
                     return text
@@ -117,9 +121,10 @@ def build_hebrew_fallback(ref, he_ref, url, err):
         f"📖 מקור: {he_ref} ({ref})\n\n"
         f"🧩 המקרה בפשטות:\n"
         f"הדף עוסק בסוגיה חברתית, מוסרית או בדינים שבין אדם לחברו.\n\n"
-        f"💡 הסבר הסוגיה והמשמעות:\n"
-        f"כרגע מכסת השימוש החינמית ב-Gemini אינה זמינה ולכן לא הופק עיבוד מלא ({err}).\n"
-        f"קישור לקריאה בספריא: {url}"
+        f"⚖️ הבעיה והדיון:\n"
+        f"כרגע לא הופק עיבוד מלא מ-Gemini ({err}).\n\n"
+        f"✅ המסקנה וההכרעה:\n"
+        f"ניתן לקרוא את המקור בספריא: {url}"
     )
 
 
