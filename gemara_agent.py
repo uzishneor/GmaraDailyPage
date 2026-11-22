@@ -83,4 +83,4 @@ tg_resp = requests.post(
 if not tg_resp.ok:
     raise RuntimeError(f"Telegram API error {tg_resp.status_code}: {tg_resp.text}")
 
-print(f"Successfully sent summary for {ref}")y for {ref}")
+print(f"Successfully sent summary for {ref}")
