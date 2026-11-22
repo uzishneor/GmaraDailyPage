@@ -14,22 +14,26 @@ def flatten_text(data):
     return ""
 
 def get_active_flash_model(api_key):
-    """Finds an available Gemini Flash model that supports generateContent."""
+    """Finds the newest available Gemini Flash model that supports generateContent."""
     resp = requests.get(
         f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
         timeout=20
     )
     resp.raise_for_status()
     models = resp.json().get("models", [])
-    for m in models:
-        name = m.get("name", "")  # e.g., "models/gemini-2.5-flash"
-        methods = m.get("supportedGenerationMethods", [])
-        if "flash" in name.lower() and "generateContent" in methods and "lite" not in name.lower():
+    flash_models = [
+        m["name"] for m in models
+        if "flash" in m.get("name", "").lower()
+        and "generateContent" in m.get("supportedGenerationMethods", [])
+        and "lite" not in m.get("name", "").lower()
+    ]
+    # Prefer the newest Gemini generation (e.g., gemini-3.8-flash) first
+    for name in sorted(flash_models, reverse=True):
+        if "2.5" not in name and "2.0" not in name and "1.5" not in name:
             return name
-    for m in models:
-        if "generateContent" in m.get("supportedGenerationMethods", []):
-            return m["name"]
-    raise RuntimeError(f"No generateContent models available for this key: {[m.get('name') for m in models]}")
+    if flash_models:
+        return sorted(flash_models, reverse=True)[0]
+    raise RuntimeError(f"No Flash models available: {[m.get('name') for m in models]}")
 
 # 1. Fetch today's Daf Yomi reference from Sefaria
 cal = requests.get("https://www.sefaria.org/api/calendars", timeout=20).json()
